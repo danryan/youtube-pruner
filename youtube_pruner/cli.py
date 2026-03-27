@@ -8,7 +8,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 from dateutil.parser import isoparse
 from dotenv import load_dotenv
@@ -24,9 +24,23 @@ load_dotenv()
 SCOPES: list[str] = ["https://www.googleapis.com/auth/youtube"]
 LOG: logging.Logger = logging.getLogger("youtube-pruner")
 
-# Type alias for subscription/result dicts used throughout
-SubInfo = dict[str, str]
-ResultInfo = dict[str, str | bool]
+Status = Literal["active", "stale", "no_uploads"]
+
+
+class Subscription(TypedDict):
+    subscription_id: str
+    channel_id: str
+    channel_name: str
+
+
+class ChannelResult(TypedDict):
+    subscription_id: str
+    channel_id: str
+    channel_name: str
+    channel_url: str
+    last_upload_date: str
+    status: Status
+    deleted: bool
 
 
 def authenticate(credentials_path: str, token_path: str) -> Credentials:
@@ -75,12 +89,12 @@ def api_call_with_retry(request: Any, max_retries: int = 3) -> dict[str, Any]:
             LOG.warning("Network error (attempt %d/%d), waiting %ds: %s",
                         attempt + 1, max_retries, wait, e)
             time.sleep(wait)
-    return {}  # unreachable, satisfies type checker
+    raise RuntimeError("Unreachable: all retries exhausted without raising")
 
 
-def fetch_subscriptions(youtube: Any) -> list[SubInfo]:
-    """Paginate subscriptions.list and return list of {subscription_id, channel_id, channel_name}."""
-    subs: list[SubInfo] = []
+def fetch_subscriptions(youtube: Any) -> list[Subscription]:
+    """Paginate subscriptions.list and return all subscriptions."""
+    subs: list[Subscription] = []
     page_token: str | None = None
     while True:
         request = youtube.subscriptions().list(
@@ -91,11 +105,11 @@ def fetch_subscriptions(youtube: Any) -> list[SubInfo]:
         )
         response: dict[str, Any] = api_call_with_retry(request)
         for item in response.get("items", []):
-            subs.append({
-                "subscription_id": item["id"],
-                "channel_id": item["snippet"]["resourceId"]["channelId"],
-                "channel_name": item["snippet"]["title"],
-            })
+            subs.append(Subscription(
+                subscription_id=item["id"],
+                channel_id=item["snippet"]["resourceId"]["channelId"],
+                channel_name=item["snippet"]["title"],
+            ))
         page_token = response.get("nextPageToken")
         if not page_token:
             break
@@ -104,7 +118,6 @@ def fetch_subscriptions(youtube: Any) -> list[SubInfo]:
 
 def get_latest_upload_date(youtube: Any, channel_id: str) -> datetime | None:
     """Return the latest upload date for a channel, or None if no uploads."""
-    # Get uploads playlist ID
     request = youtube.channels().list(part="contentDetails", id=channel_id)
     response: dict[str, Any] = api_call_with_retry(request)
     items: list[dict[str, Any]] = response.get("items", [])
@@ -114,7 +127,6 @@ def get_latest_upload_date(youtube: Any, channel_id: str) -> datetime | None:
 
     uploads_playlist: str = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
-    # Get most recent video
     request = youtube.playlistItems().list(
         part="contentDetails",
         playlistId=uploads_playlist,
@@ -130,11 +142,11 @@ def get_latest_upload_date(youtube: Any, channel_id: str) -> datetime | None:
 
 
 def classify_subscriptions(
-    youtube: Any, subs: list[SubInfo], threshold_days: int
-) -> list[ResultInfo]:
+    youtube: Any, subs: list[Subscription], threshold_days: int
+) -> list[ChannelResult]:
     """Resolve upload dates and classify each subscription."""
     cutoff: datetime = datetime.now(timezone.utc) - timedelta(days=threshold_days)
-    results: list[ResultInfo] = []
+    results: list[ChannelResult] = []
     total: int = len(subs)
     for i, sub in enumerate(subs, 1):
         channel_id: str = sub["channel_id"]
@@ -154,6 +166,7 @@ def classify_subscriptions(
                         sub["channel_name"], channel_id, e)
             last_upload = None
 
+        status: Status
         if last_upload is None:
             status = "no_uploads"
         elif last_upload < cutoff:
@@ -161,21 +174,23 @@ def classify_subscriptions(
         else:
             status = "active"
 
-        results.append({
-            **sub,
-            "channel_url": f"https://www.youtube.com/channel/{channel_id}",
-            "last_upload_date": last_upload.strftime("%Y-%m-%d") if last_upload else "",
-            "status": status,
-            "deleted": False,
-        })
+        results.append(ChannelResult(
+            subscription_id=sub["subscription_id"],
+            channel_id=channel_id,
+            channel_name=sub["channel_name"],
+            channel_url=f"https://www.youtube.com/channel/{channel_id}",
+            last_upload_date=last_upload.strftime("%Y-%m-%d") if last_upload else "",
+            status=status,
+            deleted=False,
+        ))
     return results
 
 
-def print_report(results: list[ResultInfo], threshold_days: int) -> None:
+def print_report(results: list[ChannelResult], threshold_days: int) -> None:
     """Print summary table to stdout."""
-    active: list[ResultInfo] = [r for r in results if r["status"] == "active"]
-    stale: list[ResultInfo] = [r for r in results if r["status"] == "stale"]
-    no_uploads: list[ResultInfo] = [r for r in results if r["status"] == "no_uploads"]
+    active: list[ChannelResult] = [r for r in results if r["status"] == "active"]
+    stale: list[ChannelResult] = [r for r in results if r["status"] == "stale"]
+    no_uploads: list[ChannelResult] = [r for r in results if r["status"] == "no_uploads"]
 
     print(f"\nSubscriptions scanned: {len(results)}")
     print(f"Active:                {len(active)}")
@@ -186,12 +201,12 @@ def print_report(results: list[ResultInfo], threshold_days: int) -> None:
         print("\nStale channels:")
         print(f"  {'Channel Name':<26}{'Last Upload':<13}URL")
         print(f"  {'-'*26}{'-'*13}{'-'*41}")
-        for r in sorted(stale, key=lambda x: str(x["last_upload_date"])):
+        for r in sorted(stale, key=lambda x: x["last_upload_date"]):
             print(f"  {r['channel_name']:<26}{r['last_upload_date']:<13}{r['channel_url']}")
     print()
 
 
-def write_csv(results: list[ResultInfo], output_path: str) -> None:
+def write_csv(results: list[ChannelResult], output_path: str) -> None:
     """Write full results to CSV."""
     fieldnames: list[str] = [
         "subscription_id", "channel_id", "channel_name",
@@ -205,9 +220,9 @@ def write_csv(results: list[ResultInfo], output_path: str) -> None:
     LOG.info("CSV written to %s", output_path)
 
 
-def delete_stale(youtube: Any, results: list[ResultInfo], dry_run: bool) -> int:
+def delete_stale(youtube: Any, results: list[ChannelResult], dry_run: bool) -> int:
     """Delete stale subscriptions. Returns count of successful deletions."""
-    stale: list[ResultInfo] = [r for r in results if r["status"] == "stale"]
+    stale: list[ChannelResult] = [r for r in results if r["status"] == "stale"]
     if not stale:
         print("No stale subscriptions to delete.")
         return 0
@@ -238,7 +253,7 @@ def delete_stale(youtube: Any, results: list[ResultInfo], dry_run: bool) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(
         description="Identify and remove stale YouTube subscriptions."
     )
     parser.add_argument("--days", type=int,
@@ -269,14 +284,14 @@ def main() -> None:
     youtube: Any = build("youtube", "v3", credentials=creds)
 
     LOG.info("Fetching subscriptions...")
-    subs: list[SubInfo] = fetch_subscriptions(youtube)
+    subs: list[Subscription] = fetch_subscriptions(youtube)
     if not subs:
         print("No subscriptions found.")
         return
 
     LOG.info("Found %d subscriptions, resolving upload dates...", len(subs))
     try:
-        results: list[ResultInfo] = classify_subscriptions(youtube, subs, args.days)
+        results: list[ChannelResult] = classify_subscriptions(youtube, subs, args.days)
     except HttpError as e:
         if e.resp.status == 403 and "quotaExceeded" in str(e):
             print("Quota exceeded during scanning. Try again later.", file=sys.stderr)
@@ -288,7 +303,7 @@ def main() -> None:
     if args.output:
         write_csv(results, args.output)
 
-    stale: list[ResultInfo] = [r for r in results if r["status"] == "stale"]
+    stale: list[ChannelResult] = [r for r in results if r["status"] == "stale"]
     if not stale:
         return
 
