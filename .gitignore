@@ -1,8 +1,10 @@
 client_secret.json
 token.json
+.env
 __pycache__/
 *.pyc
 *.egg-info/
 dist/
 build/
 .venv/
+poetry.lock

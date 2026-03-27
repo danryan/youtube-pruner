@@ -4,17 +4,21 @@
 import argparse
 import csv
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
 
 from dateutil.parser import isoparse
+from dotenv import load_dotenv
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+load_dotenv()
 
 SCOPES = ["https://www.googleapis.com/auth/youtube"]
 LOG = logging.getLogger("youtube-pruner")
@@ -121,7 +125,8 @@ def get_latest_upload_date(youtube, channel_id: str):
 
 def classify_subscriptions(youtube, subs, threshold_days):
     """Resolve upload dates and classify each subscription."""
-    cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(days=threshold_days)
+    from datetime import timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(days=threshold_days)
     results = []
     total = len(subs)
     for i, sub in enumerate(subs, 1):
@@ -229,15 +234,18 @@ def main():
     parser = argparse.ArgumentParser(
         description="Identify and remove stale YouTube subscriptions."
     )
-    parser.add_argument("--days", type=int, default=365,
+    parser.add_argument("--days", type=int,
+                        default=int(os.getenv("YOUTUBE_PRUNER_DAYS", "365")),
                         help="Staleness threshold in days (default: 365)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print deletions without executing")
     parser.add_argument("--output", type=str, default=None,
                         help="Save full report to CSV")
-    parser.add_argument("--credentials", type=str, default="client_secret.json",
+    parser.add_argument("--credentials", type=str,
+                        default=os.getenv("YOUTUBE_PRUNER_CREDENTIALS", "client_secret.json"),
                         help="OAuth credentials file (default: client_secret.json)")
-    parser.add_argument("--token-cache", type=str, default="token.json",
+    parser.add_argument("--token-cache", type=str,
+                        default=os.getenv("YOUTUBE_PRUNER_TOKEN_CACHE", "token.json"),
                         help="Cached OAuth token file (default: token.json)")
     parser.add_argument("--yes", action="store_true",
                         help="Skip confirmation prompt")
