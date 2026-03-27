@@ -3,6 +3,7 @@ name = "youtube-pruner"
 version = "0.1.0"
 description = "CLI tool to identify and remove stale YouTube subscriptions"
 authors = []
+readme = "README.md"
 packages = [{include = "youtube_pruner"}]
 
 [tool.poetry.dependencies]
